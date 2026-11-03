@@ -8,7 +8,7 @@ export function createRelayServer(env = process.env, lookup = resolveCloudVehicl
   let running = 0;
   return http.createServer(async (req, res) => {
     const reply = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
-    if (req.method === 'GET' && req.url === '/health') return reply(200, { success: true, service: 'dtc-dss-free-relay' });
+    if (req.method === 'GET' && req.url === '/health') return reply(200, { success: true, service: 'dtc-dss-free-relay', release: '1.0.1' });
     if (req.method !== 'POST' || req.url !== '/lookup') return reply(404, { code: 'NOT_FOUND' });
     const secret = String(env.DSS_RELAY_SHARED_SECRET || '');
     const publicJwk = String(env.DSS_RELAY_PUBLIC_JWK || '');
@@ -37,7 +37,7 @@ export function createRelayServer(env = process.env, lookup = resolveCloudVehicl
       usedNonces.set(data.nonce, now + 600000);
       running++;
       try { return reply(200, { success: true, vehicle: await lookup(env, data.request || {}) }); }
-      catch (error) { return reply(502, { success: false, code: String(error.code || 'DSS_LOOKUP_FAILED') }); }
+      catch (error) { return reply(502, { success: false, code: String(error.code || 'DSS_LOOKUP_FAILED'), stage: error.stage || '', transportCode: error.transportCode || '' }); }
       finally { running--; }
     } catch { return reply(400, { code: 'INVALID_REQUEST' }); }
   });

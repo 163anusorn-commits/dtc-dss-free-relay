@@ -51,6 +51,7 @@ export async function resolveCloudVehicle(env, request) {
     }); } catch (cause) {
       const error = failure(cause.name === 'TimeoutError' || cause.message === 'DSS_TLS_TIMEOUT' ? 'DSS_NETWORK_TIMEOUT' : 'DSS_NETWORK_ERROR');
       error.stage = path.split('?')[0];
+      error.transportCode = String(cause.cause?.code || cause.name || 'UNKNOWN');
       error.transportDetail = String(cause.message || cause.name || '').slice(0, 160);
       throw error;
     }
