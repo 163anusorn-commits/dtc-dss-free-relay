@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: dtc-dss-free-relay
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm run check
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: 'off'
+    envVars:
+      - key: NODE_VERSION
+        value: '22'
+      - key: DSS_USERNAME
+        sync: false
+      - key: DSS_PASSWORD
+        sync: false
+      - key: DSS_RELAY_PUBLIC_JWK
+        value: '{"kty":"EC","x":"2q6tANp_6hNSjYH9BANiWb1qq2sed2vmMRLwuct79ic","y":"2sNXMhsrhhHmDI4lhF7MqWLStlyPm4Gxwx3k-9ahlw8","crv":"P-256"}'

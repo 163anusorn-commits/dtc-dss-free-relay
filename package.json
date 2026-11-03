@@ -1,0 +1,11 @@
+{
+  "name": "dtc-dss-free-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node relay/server.js",
+    "check": "node --check relay/server.js && node --check src/cloud-dss.js"
+  }
+}

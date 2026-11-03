@@ -1,0 +1,13 @@
+.env
+.env.*
+node_modules/
+*.log
+*.pdf
+*.png
+cache/
+config/
+.dev.vars*
+*.pem
+*.key
+*private*.json
+.wrangler/
