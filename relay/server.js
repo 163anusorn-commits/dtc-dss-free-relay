@@ -37,7 +37,8 @@ export function createRelayServer(env = process.env, lookup = resolveCloudVehicl
       usedNonces.set(data.nonce, now + 600000);
       running++;
       try { return reply(200, { success: true, vehicle: await lookup(env, data.request || {}) }); }
-      catch (error) { return reply(502, { success: false, code: String(error.code || 'DSS_LOOKUP_FAILED'), stage: error.stage || '', transportCode: error.transportCode || '' }); }
+      catch (error) { return reply(502, { success: false, code: String(error.code || 'DSS_LOOKUP_FAILED'), stage: error.stage || '', transportCode: error.transportCode || '',
+        ...(error.code==='DSS_PLATE_CONFIRMATION_REQUIRED'?{identityConflict:error.identityConflict}:{}) }); }
       finally { running--; }
     } catch { return reply(400, { code: 'INVALID_REQUEST' }); }
   });

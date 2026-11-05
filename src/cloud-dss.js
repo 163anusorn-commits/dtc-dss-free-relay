@@ -3,6 +3,17 @@ const normalizeSim = value => String(value || '').replace(/\D/g, '').replace(/^6
 const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
 function failure(code) { const error = new Error(code); error.code = code; return error; }
 
+export function plateConflictEvidence(value) {
+  if(!value || !/^0[689]\d{8}$/.test(value.sim||''))return null;
+  const result={sim:value.sim};
+  for(const key of ['boxNo','redocPlate','jobPlate','jobId','refSO']) {
+    if(typeof value[key]!=='string' || !value[key].trim() || value[key].length>100 || /[\r\n]/.test(value[key]))return null;
+    result[key]=value[key].trim();
+  }
+  result.jobCreatedAt=typeof value.jobCreatedAt==='string'?value.jobCreatedAt.slice(0,40):'';
+  return result;
+}
+
 export async function resolveCloudVehicle(env, request) {
   const sim = normalizeSim(request.sim);
   if (!/^0[689]\d{8}$/.test(sim)) throw failure('SIM_INVALID');
@@ -21,16 +32,21 @@ export async function resolveCloudVehicle(env, request) {
     let binary = ''; for (const byte of signed) binary += String.fromCharCode(byte);
     const signature = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
     const response = await fetch(relayUrl, { method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json', 'x-service-signature': signature }, body: raw, signal: AbortSignal.timeout(150000) });
-    if ([429, 502, 503, 504].includes(response.status) && attempt < 2) {
-      await response.body?.cancel();
+    let data;
+    try { data = await response.json(); } catch { /* A sleeping free host can return an HTML gateway error. */ }
+    const retryable=!data || ['RELAY_BUSY','DSS_NETWORK_TIMEOUT','DSS_NETWORK_ERROR','DSS_HTTP_502','DSS_HTTP_503','DSS_HTTP_504'].includes(data.code);
+    if ([429, 502, 503, 504].includes(response.status) && retryable && attempt < 2) {
       // Retry only a real queued lookup after a free host's cold start/busy
       // response. No scheduled keepalive traffic is generated.
       await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 10000));
       continue;
     }
-    let data;
-    try { data = await response.json(); } catch { throw failure('RELAY_INVALID_RESPONSE'); }
-    if (!response.ok || !data.success) throw failure(data.code || 'RELAY_LOOKUP_FAILED');
+    if(!data)throw failure('RELAY_INVALID_RESPONSE');
+    if (!response.ok || !data.success) {
+      const error=failure(data.code || 'RELAY_LOOKUP_FAILED');
+      if(error.code==='DSS_PLATE_CONFIRMATION_REQUIRED')error.identityConflict=plateConflictEvidence(data.identityConflict);
+      throw error;
+    }
     const vehicle = data.vehicle;
     if (!vehicle || normalizeSim(vehicle.sim) !== sim || !vehicle.customer || !vehicle.address || !vehicle.boxNo || !vehicle.plate) throw failure('RELAY_IDENTITY_INVALID');
     if (!Number.isFinite(Date.parse(vehicle.fetchedAt)) || Math.abs(Date.now() - Date.parse(vehicle.fetchedAt)) > 300000) throw failure('RELAY_DATA_EXPIRED');
@@ -84,22 +100,28 @@ export async function resolveCloudVehicle(env, request) {
   });
   const jobs = (jobsResult.getJobList || []).filter(row => normalizeSim(row.sim || row.job_sim) === sim);
   if (!jobs.length) throw failure('DSS_EXACT_JOB_NOT_FOUND');
+  // The website returns newest first. If all rows have sortable creation
+  // timestamps, enforce that order rather than relying on row order.
+  if(jobs.every(row=>/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(row.create_time||'')))jobs.sort((a,b)=>b.create_time.localeCompare(a.create_time));
   const job = jobs[0];
+  if(job.create_time && jobs.some(row=>row!==job && row.create_time===job.create_time &&
+    [clean(row.blackbox).toLowerCase(),clean(row.truck_no),clean(row.ref_doc_so)].join('|')!==[clean(job.blackbox).toLowerCase(),clean(job.truck_no),clean(job.ref_doc_so)].join('|')))throw failure('DSS_JOB_AMBIGUOUS');
   if (job.blackbox && clean(job.blackbox).toLowerCase() !== clean(identity.blackbox).toLowerCase()) throw failure('DSS_IDENTITY_MISMATCH');
   let plate=clean(identity.truck), identityEvidence;
+  const conflict=plateConflictEvidence({sim,boxNo:clean(identity.blackbox),redocPlate:plate,jobPlate:clean(job.truck_no),
+    jobId:clean(job.main_job_id),refSO:clean(job.ref_doc_so),jobCreatedAt:clean(job.create_time)});
+  const confirmed=request.identityConfirmation;
+  if(confirmed) {
+    if(confirmed.source!=='request-confirmation' || !confirmed.eventId || !conflict ||
+      ['sim','boxNo','redocPlate','jobPlate','jobId','refSO','jobCreatedAt'].some(key=>confirmed[key]!==conflict[key]) ||
+      !Number.isFinite(Date.parse(confirmed.confirmedAt)) || Date.now()-Date.parse(confirmed.confirmedAt)>300000 ||
+      Date.parse(confirmed.confirmedAt)>Date.now()+5000)throw failure('DSS_CONFIRMATION_CHANGED');
+  }
   if (job.truck_no && clean(job.truck_no).replace(/[\s-]/g, '') !== plate.replace(/[\s-]/g, '')) {
-    const confirmed=request.identityConfirmation;
-    // A conflicting REDOC plate can be resolved only by an operator-confirmed
-    // exact SIM/box/current Job plate tuple supplied by the authenticated server.
-    // Never choose an older matching Job or accept a caller's plate by itself.
-    if(confirmed?.source!=='operator-confirmation' || normalizeSim(confirmed.sim)!==sim ||
-      !clean(job.blackbox) || clean(confirmed.boxNo).toLowerCase()!==clean(identity.blackbox).toLowerCase() ||
-      clean(confirmed.boxNo).toLowerCase()!==clean(job.blackbox).toLowerCase() ||
-      clean(confirmed.plate).replace(/[\s-]/g,'')!==clean(job.truck_no).replace(/[\s-]/g,'') ||
-      !Number.isFinite(Date.parse(confirmed.confirmedAt)) || Date.parse(confirmed.confirmedAt)>Date.now()+5000)throw failure('DSS_IDENTITY_MISMATCH');
+    if(!conflict || !clean(job.blackbox) || clean(job.blackbox).toLowerCase()!==clean(identity.blackbox).toLowerCase())throw failure('DSS_IDENTITY_MISMATCH');
+    if(!confirmed){const error=failure('DSS_PLATE_CONFIRMATION_REQUIRED');error.identityConflict=conflict;throw error;}
     plate=clean(job.truck_no);
-    identityEvidence={rule:'OPERATOR_CONFIRMED_CURRENT_PLATE',redocPlate:clean(identity.truck),jobPlate:plate,
-      jobId:clean(job.main_job_id),refSO:clean(job.ref_doc_so),confirmedAt:confirmed.confirmedAt};
+    identityEvidence={rule:'REQUEST_CONFIRMED_CURRENT_PLATE',...conflict,eventId:confirmed.eventId,confirmedAt:confirmed.confirmedAt};
   }
   if (!job.ref_doc_so) throw failure('DSS_SO_REQUIRED');
   const so = await json('/dtcsys/model/PLAN/model_plan_job_tracking.php?page=getSoDetail', { so: job.ref_doc_so });
@@ -121,5 +143,5 @@ export async function resolveCloudVehicle(env, request) {
   if (!customer || !address || !clean(header[prefix + 'address'])) throw failure('CERTIFICATE_CUSTOMER_INCOMPLETE');
   return { customer, address, phone, plate, sim, boxNo: clean(identity.blackbox), model,
     ...(identityEvidence?{identityEvidence}:{}),
-    condition: request.condition || 'Good', source: 'DSS Live (Cloud login + exact SIM + Job/SO Ship To'+(identityEvidence?'; operator-confirmed current plate':'')+')', fetchedAt: new Date().toISOString() };
+    condition: request.condition || 'Good', source: 'DSS Live (Cloud login + exact SIM + Job/SO Ship To'+(identityEvidence?'; request-confirmed current plate':'')+')', fetchedAt: new Date().toISOString() };
 }
