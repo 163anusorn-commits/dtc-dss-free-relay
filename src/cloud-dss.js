@@ -86,7 +86,21 @@ export async function resolveCloudVehicle(env, request) {
   if (!jobs.length) throw failure('DSS_EXACT_JOB_NOT_FOUND');
   const job = jobs[0];
   if (job.blackbox && clean(job.blackbox).toLowerCase() !== clean(identity.blackbox).toLowerCase()) throw failure('DSS_IDENTITY_MISMATCH');
-  if (job.truck_no && clean(job.truck_no).replace(/[\s-]/g, '') !== clean(identity.truck).replace(/[\s-]/g, '')) throw failure('DSS_IDENTITY_MISMATCH');
+  let plate=clean(identity.truck), identityEvidence;
+  if (job.truck_no && clean(job.truck_no).replace(/[\s-]/g, '') !== plate.replace(/[\s-]/g, '')) {
+    const confirmed=request.identityConfirmation;
+    // A conflicting REDOC plate can be resolved only by an operator-confirmed
+    // exact SIM/box/current Job plate tuple supplied by the authenticated server.
+    // Never choose an older matching Job or accept a caller's plate by itself.
+    if(confirmed?.source!=='operator-confirmation' || normalizeSim(confirmed.sim)!==sim ||
+      !clean(job.blackbox) || clean(confirmed.boxNo).toLowerCase()!==clean(identity.blackbox).toLowerCase() ||
+      clean(confirmed.boxNo).toLowerCase()!==clean(job.blackbox).toLowerCase() ||
+      clean(confirmed.plate).replace(/[\s-]/g,'')!==clean(job.truck_no).replace(/[\s-]/g,'') ||
+      !Number.isFinite(Date.parse(confirmed.confirmedAt)) || Date.parse(confirmed.confirmedAt)>Date.now()+5000)throw failure('DSS_IDENTITY_MISMATCH');
+    plate=clean(job.truck_no);
+    identityEvidence={rule:'OPERATOR_CONFIRMED_CURRENT_PLATE',redocPlate:clean(identity.truck),jobPlate:plate,
+      jobId:clean(job.main_job_id),refSO:clean(job.ref_doc_so),confirmedAt:confirmed.confirmedAt};
+  }
   if (!job.ref_doc_so) throw failure('DSS_SO_REQUIRED');
   const so = await json('/dtcsys/model/PLAN/model_plan_job_tracking.php?page=getSoDetail', { so: job.ref_doc_so });
   const header = so.getDlt_SO?.[0];
@@ -105,6 +119,7 @@ export async function resolveCloudVehicle(env, request) {
   const model = clean(request.model) || 'E-SERIES';
   if (!['E-SERIES', 'SWE', 'DTRACK', 'SWE-01', 'Smart Eye Plus'].includes(model)) throw failure('CERTIFICATE_MODEL_INVALID');
   if (!customer || !address || !clean(header[prefix + 'address'])) throw failure('CERTIFICATE_CUSTOMER_INCOMPLETE');
-  return { customer, address, phone, plate: clean(identity.truck), sim, boxNo: clean(identity.blackbox), model,
-    condition: request.condition || 'Good', source: 'DSS Live (Cloud login + exact SIM + Job/SO Ship To)', fetchedAt: new Date().toISOString() };
+  return { customer, address, phone, plate, sim, boxNo: clean(identity.blackbox), model,
+    ...(identityEvidence?{identityEvidence}:{}),
+    condition: request.condition || 'Good', source: 'DSS Live (Cloud login + exact SIM + Job/SO Ship To'+(identityEvidence?'; operator-confirmed current plate':'')+')', fetchedAt: new Date().toISOString() };
 }
